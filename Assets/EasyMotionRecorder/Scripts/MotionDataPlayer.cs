@@ -8,159 +8,334 @@ http://opensource.org/licenses/mit-license.php
 */
 
 using UnityEngine;
+using UnityEngine.InputSystem;
 using System;
+using System.Collections.Generic;
 
 namespace Entum
 {
     /// <summary>
-    /// Motion data playback class
-    /// Please set Script Execution Order to a large value like 20000 for assets with physics-based movement
-    /// like SpringBone, DynamicBone, BulletPhysicsImpl, etc.
-    /// DefaultExecutionOrder(11000) is intended to make the processing order later than VRIK systems
+    /// Motion data playback class with optimized performance and modern input handling.
+    /// Set Script Execution Order to 11000 to ensure processing after VRIK systems.
+    /// For physics-based assets (SpringBone, DynamicBone, etc.), set to 20000.
     /// </summary>
     [DefaultExecutionOrder(11000)]
-    public class MotionDataPlayer : MonoBehaviour
+    public sealed class MotionDataPlayer : MonoBehaviour, IDisposable
     {
-        [SerializeField]
-        private KeyCode _playStartKey = KeyCode.S;
-        [SerializeField]
-        private KeyCode _playStopKey = KeyCode.T;
+        #region Events
+        public event Action OnPlaybackStarted;
+        public event Action OnPlaybackStopped;
+        public event Action OnPlaybackCompleted;
+        #endregion
 
+        #region Serialized Fields
+        [Header("Input Settings")]
         [SerializeField]
-        protected HumanoidPoses RecordedMotionData;
+        private InputAction _playAction = new InputAction(binding: "<Keyboard>/s");
+        
+        [SerializeField]
+        private InputAction _stopAction = new InputAction(binding: "<Keyboard>/t");
+
+        [Header("Motion Data")]
+        [SerializeField]
+        private HumanoidPoses _recordedMotionData;
+        
         [SerializeField]
         private Animator _animator;
 
-        [SerializeField, Tooltip("Specify the starting frame. 0 starts from the beginning of the file")]
+        [Header("Playback Settings")]
+        [SerializeField, Tooltip("Specify the starting frame. 0 starts from the beginning")]
         private int _startFrame;
-        [SerializeField]
-        private bool _playing;
-        [SerializeField]
-        private int _frameIndex;
 
-        [SerializeField, Tooltip("OBJECTROOT is fine for normal use. Change only for special equipment")]
+        [SerializeField, Tooltip("OBJECTROOT for normal use, change only for special equipment")]
         private MotionDataSettings.Rootbonesystem _rootBoneSystem = MotionDataSettings.Rootbonesystem.Objectroot;
-        [SerializeField, Tooltip("This parameter is not used when rootBoneSystem is OBJECTROOT")]
+        
+        [SerializeField, Tooltip("Used only when rootBoneSystem is not OBJECTROOT")]
         private HumanBodyBones _targetRootBone = HumanBodyBones.Hips;
+        #endregion
 
+        #region Private Fields
         private HumanPoseHandler _poseHandler;
-        private Action _onPlayFinish;
-        private float _playingTime;
+        private readonly ObjectPool<HumanPose> _posePool = new();
+        private Transform _rootBoneTransform;
+        private bool _isDisposed;
+        private bool _isInitialized;
+        
+        private PlaybackState _state = new();
+        #endregion
+
+        #region Properties
+        public bool IsPlaying => _state.IsPlaying;
+        public float PlaybackTime => _state.PlayingTime;
+        public int CurrentFrame => _state.FrameIndex;
+        
+        public HumanoidPoses RecordedMotionData
+        {
+            get => _recordedMotionData;
+            set
+            {
+                _recordedMotionData = value;
+                ValidateMotionData();
+            }
+        }
+        #endregion
+
+        #region Unity Lifecycle
+        private void OnEnable()
+        {
+            InitializeInputActions();
+        }
+
+        private void OnDisable()
+        {
+            DisableInputActions();
+            StopMotion();
+        }
 
         private void Awake()
         {
-            if (_animator == null)
-            {
-                Debug.LogError("No animator set in MotionDataPlayer. Removing MotionDataPlayer.");
-                Destroy(this);
-                return;
-            }
-
-            _poseHandler = new HumanPoseHandler(_animator.avatar, _animator.transform);
-            _onPlayFinish += StopMotion;
+            Initialize();
         }
 
-        // Update is called once per frame
-        private void Update()
+        private void OnDestroy()
         {
-            if (Input.GetKeyDown(_playStartKey))
-            {
-                PlayMotion();
-            }
-
-            if (Input.GetKeyDown(_playStopKey))
-            {
-                StopMotion();
-            }
+            Dispose(true);
         }
 
         private void LateUpdate()
         {
-            if (!_playing)
-            {
-                return;
-            }
+            if (!_state.IsPlaying || !_isInitialized) return;
+            
+            UpdatePlayback();
+        }
+        #endregion
 
-            _playingTime += Time.deltaTime;
-            SetHumanPose();
+        #region Public Methods
+        /// <summary>
+        /// Starts motion playback from the specified frame
+        /// </summary>
+        /// <param name="startFrame">Optional starting frame, defaults to configured start frame</param>
+        public void Play(int? startFrame = null)
+        {
+            if (!ValidatePlaybackState()) return;
+
+            _state.StartPlayback(startFrame ?? _startFrame);
+            OnPlaybackStarted?.Invoke();
         }
 
         /// <summary>
-        /// Start motion data playback
+        /// Stops motion playback
         /// </summary>
-        private void PlayMotion()
+        public void Stop()
         {
-            if (_playing)
-            {
-                return;
-            }
+            if (!_state.IsPlaying) return;
 
-            if (RecordedMotionData == null)
-            {
-                Debug.LogError("No recorded motion data specified. Playback will not proceed.");
-                return;
-            }
-
-            _playingTime = _startFrame * (Time.deltaTime / 1f);
-            _frameIndex = _startFrame;
-            _playing = true;
+            _state.StopPlayback();
+            OnPlaybackStopped?.Invoke();
         }
 
-        /// <summary>
-        /// End motion data playback. Automatically called when frame count reaches the end
-        /// </summary>
-        private void StopMotion()
+        public void Dispose()
         {
-            if (!_playing)
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+        #endregion
+
+        #region Private Methods
+        private void Initialize()
+        {
+            if (_animator == null)
             {
+                Debug.LogError($"[{nameof(MotionDataPlayer)}] No animator assigned. Component will be removed.");
+                Destroy(this);
                 return;
             }
 
-            _playingTime = 0f;
-            _frameIndex = _startFrame;
-            _playing = false;
+            try
+            {
+                _poseHandler = new HumanPoseHandler(_animator.avatar, _animator.transform);
+                _rootBoneTransform = _animator.GetBoneTransform(_targetRootBone);
+                ValidateMotionData();
+                _isInitialized = true;
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"[{nameof(MotionDataPlayer)}] Initialization failed: {e.Message}");
+                Destroy(this);
+            }
         }
 
-        private void SetHumanPose()
+        private void InitializeInputActions()
         {
-            var pose = new HumanPose();
-            pose.muscles = RecordedMotionData.Poses[_frameIndex].Muscles;
-            _poseHandler.SetHumanPose(ref pose);
-            pose.bodyPosition = RecordedMotionData.Poses[_frameIndex].BodyPosition;
-            pose.bodyRotation = RecordedMotionData.Poses[_frameIndex].BodyRotation;
+            _playAction.Enable();
+            _stopAction.Enable();
 
-            switch (_rootBoneSystem)
+            _playAction.performed += _ => Play();
+            _stopAction.performed += _ => Stop();
+        }
+
+        private void DisableInputActions()
+        {
+            _playAction.Disable();
+            _stopAction.Disable();
+
+            _playAction.performed -= _ => Play();
+            _stopAction.performed -= _ => Stop();
+        }
+
+        private bool ValidatePlaybackState()
+        {
+            if (_state.IsPlaying)
             {
-                case MotionDataSettings.Rootbonesystem.Objectroot:
-                    //_animator.transform.localPosition = RecordedMotionData.Poses[_frameIndex].BodyRootPosition;
-                    //_animator.transform.localRotation = RecordedMotionData.Poses[_frameIndex].BodyRootRotation;
-                    break;
-
-                case MotionDataSettings.Rootbonesystem.Hipbone:
-                    pose.bodyPosition = RecordedMotionData.Poses[_frameIndex].BodyPosition;
-                    pose.bodyRotation = RecordedMotionData.Poses[_frameIndex].BodyRotation;
-
-                    _animator.GetBoneTransform(_targetRootBone).position = RecordedMotionData.Poses[_frameIndex].BodyRootPosition;
-                    _animator.GetBoneTransform(_targetRootBone).rotation = RecordedMotionData.Poses[_frameIndex].BodyRootRotation;
-                    break;
-
-                default:
-                    throw new ArgumentOutOfRangeException();
+                Debug.LogWarning($"[{nameof(MotionDataPlayer)}] Playback is already in progress.");
+                return false;
             }
 
-            // Adjust playback speed for motion data with frame drops
-            if (_playingTime > RecordedMotionData.Poses[_frameIndex].Time)
+            if (_recordedMotionData == null || _recordedMotionData.Poses.Count == 0)
             {
-                _frameIndex++;
+                Debug.LogError($"[{nameof(MotionDataPlayer)}] No valid motion data available for playback.");
+                return false;
             }
 
-            if (_frameIndex == RecordedMotionData.Poses.Count - 1)
+            return true;
+        }
+
+        private void ValidateMotionData()
+        {
+            if (_recordedMotionData == null)
             {
-                if (_onPlayFinish != null)
+                Debug.LogWarning($"[{nameof(MotionDataPlayer)}] No motion data assigned.");
+                return;
+            }
+
+            if (_recordedMotionData.Poses.Count == 0)
+            {
+                Debug.LogWarning($"[{nameof(MotionDataPlayer)}] Motion data contains no poses.");
+            }
+        }
+
+        private void UpdatePlayback()
+        {
+            _state.UpdatePlayingTime(Time.deltaTime);
+            
+            if (ShouldAdvanceFrame())
+            {
+                if (_state.FrameIndex >= _recordedMotionData.Poses.Count - 1)
                 {
-                    _onPlayFinish();
+                    CompletePlayback();
+                    return;
+                }
+                
+                _state.AdvanceFrame();
+            }
+
+            ApplyPose();
+        }
+
+        private bool ShouldAdvanceFrame()
+        {
+            return _state.PlayingTime > _recordedMotionData.Poses[_state.FrameIndex].Time;
+        }
+
+        private void CompletePlayback()
+        {
+            Stop();
+            OnPlaybackCompleted?.Invoke();
+        }
+
+        private void ApplyPose()
+        {
+            var pose = _posePool.Get();
+            var currentPose = _recordedMotionData.Poses[_state.FrameIndex];
+
+            pose.muscles = currentPose.Muscles;
+            pose.bodyPosition = currentPose.BodyPosition;
+            pose.bodyRotation = currentPose.BodyRotation;
+
+            try
+            {
+                ApplyPoseToCharacter(pose, currentPose);
+            }
+            finally
+            {
+                _posePool.Release(pose);
+            }
+        }
+
+        private void ApplyPoseToCharacter(HumanPose pose, HumanoidPoses.SerializeHumanoidPose currentPose)
+        {
+            _poseHandler.SetHumanPose(ref pose);
+
+            if (_rootBoneSystem == MotionDataSettings.Rootbonesystem.Hipbone && _rootBoneTransform != null)
+            {
+                _rootBoneTransform.position = currentPose.BodyRootPosition;
+                _rootBoneTransform.rotation = currentPose.BodyRootRotation;
+            }
+        }
+
+        private void Dispose(bool disposing)
+        {
+            if (_isDisposed) return;
+
+            if (disposing)
+            {
+                _poseHandler?.Dispose();
+                _posePool.Clear();
+                DisableInputActions();
+            }
+
+            _isDisposed = true;
+        }
+        #endregion
+
+        #region Helper Classes
+        private sealed class PlaybackState
+        {
+            public bool IsPlaying { get; private set; }
+            public float PlayingTime { get; private set; }
+            public int FrameIndex { get; private set; }
+
+            public void StartPlayback(int startFrame)
+            {
+                IsPlaying = true;
+                PlayingTime = startFrame * (Time.deltaTime / 1f);
+                FrameIndex = startFrame;
+            }
+
+            public void StopPlayback()
+            {
+                IsPlaying = false;
+                PlayingTime = 0f;
+                FrameIndex = 0;
+            }
+
+            public void UpdatePlayingTime(float deltaTime)
+            {
+                PlayingTime += deltaTime;
+            }
+
+            public void AdvanceFrame()
+            {
+                FrameIndex++;
+            }
+        }
+
+        private sealed class ObjectPool<T> where T : class, new()
+        {
+            private readonly Stack<T> _pool = new();
+
+            public T Get() => _pool.Count > 0 ? _pool.Pop() : new T();
+
+            public void Release(T item)
+            {
+                if (item != null)
+                {
+                    _pool.Push(item);
                 }
             }
+
+            public void Clear() => _pool.Clear();
         }
+        #endregion
     }
 }

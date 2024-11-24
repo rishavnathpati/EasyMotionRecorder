@@ -8,9 +8,10 @@ http://opensource.org/licenses/mit-license.php
 */
 
 using UnityEngine;
+using UnityEngine.InputSystem;
 using System;
 using System.IO;
-using System.Reflection;
+using System.Collections.Generic;
 #if UNITY_EDITOR
 using UnityEditor;
 #endif
@@ -18,108 +19,266 @@ using UnityEditor;
 namespace Entum
 {
     /// <summary>
-    /// Motion data recording class
-    /// Script execution order is set to maximum value = 32000 because we want to capture
-    /// the pose after VRIK processing is complete
+    /// Motion data recording class with optimized performance and modern input handling.
+    /// Set to execution order 32000 to capture pose after VRIK processing.
     /// </summary>
     [DefaultExecutionOrder(32000)]
-    public class MotionDataRecorder : MonoBehaviour
+    public sealed class MotionDataRecorder : MonoBehaviour, IDisposable
     {
-        [SerializeField]
-        private KeyCode _recordStartKey = KeyCode.R;
-        [SerializeField]
-        private KeyCode _recordStopKey = KeyCode.X;
+        #region Events
+        public event Action OnRecordStart;
+        public event Action OnRecordEnd;
+        public event Action<float> OnFrameRecorded;
+        #endregion
 
+        #region Serialized Fields
+        [Header("Input Settings")]
+        [SerializeField]
+        private InputAction _recordStartAction = new(binding: "<Keyboard>/r");
+        
+        [SerializeField]
+        private InputAction _recordStopAction = new(binding: "<Keyboard>/x");
+
+        [Header("Recording Settings")]
         [SerializeField]
         private Animator _animator;
 
-        [SerializeField]
-        private bool _recording;
-        [SerializeField]
-        protected int FrameIndex;
+        [SerializeField, Range(0, 120), Tooltip("Recording FPS. 0 means no limit")]
+        private float _targetFPS = 60.0f;
 
-        [SerializeField, Tooltip("OBJECTROOT is fine for normal use. Change only for special equipment")]
+        [Header("Bone Settings")]
+        [SerializeField, Tooltip("OBJECTROOT for normal use")]
         private MotionDataSettings.Rootbonesystem _rootBoneSystem = MotionDataSettings.Rootbonesystem.Objectroot;
-        [SerializeField, Tooltip("This parameter is not used when rootBoneSystem is OBJECTROOT")]
+        
+        [SerializeField, Tooltip("Used only when not OBJECTROOT")]
         private HumanBodyBones _targetRootBone = HumanBodyBones.Hips;
+        
         [SerializeField]
-        private HumanBodyBones IK_LeftFootBone = HumanBodyBones.LeftFoot;
+        private HumanBodyBones _ikLeftFootBone = HumanBodyBones.LeftFoot;
+        
         [SerializeField]
-        private HumanBodyBones IK_RightFootBone = HumanBodyBones.RightFoot;
+        private HumanBodyBones _ikRightFootBone = HumanBodyBones.RightFoot;
+        #endregion
 
-        protected HumanoidPoses Poses;
-        protected float RecordedTime;
-        protected float StartTime;
-
-        private HumanPose _currentPose;
+        #region Private Fields
+        private readonly ObjectPool<HumanoidPoses.SerializeHumanoidPose> _posePool = new();
+        private readonly ObjectPool<TransformData> _transformPool = new();
+        private readonly ObjectPool<HumanPose> _humanPosePool = new();
+        
         private HumanPoseHandler _poseHandler;
-        public Action OnRecordStart;
-        public Action OnRecordEnd;
+        private Transform _rootBoneTransform;
+        private Transform _leftFootTransform;
+        private Transform _rightFootTransform;
+        private RecordingState _state;
+        private bool _isDisposed;
+        private bool _isInitialized;
+        #endregion
 
-        [Tooltip("Recording FPS. 0 means no limit. Cannot exceed Update FPS.")]
-        public float TargetFPS = 60.0f;
+        #region Properties
+        public bool IsRecording => _state?.IsRecording ?? false;
+        public float RecordedTime => _state?.RecordedTime ?? 0f;
+        public int FrameCount => _state?.FrameCount ?? 0;
+        public Animator CharacterAnimator => _animator;
+        
+        public float TargetFPS
+        {
+            get => _targetFPS;
+            set => _targetFPS = Mathf.Clamp(value, 0f, 120f);
+        }
+        #endregion
 
-        // Use this for initialization
+        #region Unity Lifecycle
+        private void OnEnable()
+        {
+            InitializeInputActions();
+        }
+
+        private void OnDisable()
+        {
+            DisableInputActions();
+            StopRecording();
+        }
+
         private void Awake()
+        {
+            Initialize();
+        }
+
+        private void OnDestroy()
+        {
+            Dispose(true);
+        }
+
+        private void LateUpdate()
+        {
+            if (!_state.IsRecording || !_isInitialized) return;
+
+            UpdateRecording();
+        }
+        #endregion
+
+        #region Public Methods
+        public void StartRecording()
+        {
+            if (!ValidateRecordingState()) return;
+
+            _state.StartRecording();
+            OnRecordStart?.Invoke();
+        }
+
+        public void StopRecording()
+        {
+            if (!_state.IsRecording) return;
+
+            WriteAnimationFile();
+            _state.StopRecording();
+            OnRecordEnd?.Invoke();
+        }
+
+        public void Dispose()
+        {
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        public static DirectoryInfo SafeCreateDirectory(string path)
+        {
+            return Directory.Exists(path) ? null : Directory.CreateDirectory(path);
+        }
+        #endregion
+
+        #region Private Methods
+        private void Initialize()
+        {
+            if (!ValidateComponents()) return;
+
+            try
+            {
+                _poseHandler = new HumanPoseHandler(_animator.avatar, _animator.transform);
+                CacheTransforms();
+                _state = new RecordingState();
+                _isInitialized = true;
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"[{nameof(MotionDataRecorder)}] Initialization failed: {e.Message}");
+                enabled = false;
+            }
+        }
+
+        private bool ValidateComponents()
         {
             if (_animator == null)
             {
-                Debug.LogError("No animator set in MotionDataRecorder. Removing MotionDataRecorder.");
-                Destroy(this);
-                return;
+                Debug.LogError($"[{nameof(MotionDataRecorder)}] Animator is required.");
+                enabled = false;
+                return false;
             }
 
-            _poseHandler = new HumanPoseHandler(_animator.avatar, _animator.transform);
+            if (_animator.avatar == null || !_animator.avatar.isHuman)
+            {
+                Debug.LogError($"[{nameof(MotionDataRecorder)}] Humanoid avatar is required.");
+                enabled = false;
+                return false;
+            }
+
+            return true;
         }
 
-        private void Update()
+        private void CacheTransforms()
         {
-            if (Input.GetKeyDown(_recordStartKey))
+            _rootBoneTransform = _animator.GetBoneTransform(_targetRootBone);
+            _leftFootTransform = _animator.GetBoneTransform(_ikLeftFootBone);
+            _rightFootTransform = _animator.GetBoneTransform(_ikRightFootBone);
+        }
+
+        private void InitializeInputActions()
+        {
+            _recordStartAction.Enable();
+            _recordStopAction.Enable();
+
+            _recordStartAction.performed += _ => StartRecording();
+            _recordStopAction.performed += _ => StopRecording();
+        }
+
+        private void DisableInputActions()
+        {
+            _recordStartAction.Disable();
+            _recordStopAction.Disable();
+
+            _recordStartAction.performed -= _ => StartRecording();
+            _recordStopAction.performed -= _ => StopRecording();
+        }
+
+        private bool ValidateRecordingState()
+        {
+            if (_state.IsRecording)
             {
-                RecordStart();
+                Debug.LogWarning($"[{nameof(MotionDataRecorder)}] Recording is already in progress.");
+                return false;
             }
 
-            if (Input.GetKeyDown(_recordStopKey))
+            return true;
+        }
+
+        private void UpdateRecording()
+        {
+            _state.UpdateTime(Time.time);
+
+            if (!ShouldRecordFrame()) return;
+
+            RecordFrame();
+            _state.IncrementFrame();
+        }
+
+        private bool ShouldRecordFrame()
+        {
+            if (_targetFPS <= 0) return true;
+
+            var nextTime = (1.0f * (_state.FrameCount + 1)) / _targetFPS;
+            if (nextTime > _state.RecordedTime) return false;
+
+            if (_state.FrameCount % _targetFPS == 0)
             {
-                RecordEnd();
+                var currentFPS = 1 / (_state.RecordedTime / _state.FrameCount);
+                OnFrameRecorded?.Invoke(currentFPS);
+            }
+
+            return true;
+        }
+
+        private void RecordFrame()
+        {
+            var pose = _humanPosePool.Get();
+            _poseHandler.GetHumanPose(ref pose);
+
+            var serializedPose = _posePool.Get();
+            try
+            {
+                RecordPoseData(serializedPose, pose);
+                _state.Poses.Poses.Add(serializedPose);
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"[{nameof(MotionDataRecorder)}] Failed to record frame: {e.Message}");
+                _posePool.Release(serializedPose);
+            }
+            finally
+            {
+                _humanPosePool.Release(pose);
             }
         }
 
-        // Update is called once per frame
-        private void LateUpdate()
+        private void RecordPoseData(HumanoidPoses.SerializeHumanoidPose serializedPose, HumanPose pose)
         {
-            if (!_recording)
-            {
-                return;
-            }
+            RecordRootMotion(serializedPose);
+            RecordIKPositions(serializedPose, pose);
+            RecordFrameData(serializedPose, pose);
+            RecordBoneTransforms(serializedPose);
+        }
 
-            RecordedTime = Time.time - StartTime;
-
-            if (TargetFPS != 0.0f)
-            {
-                var nextTime = (1.0f * (FrameIndex + 1)) / TargetFPS;
-                if (nextTime > RecordedTime)
-                {
-                    return;
-                }
-                if (FrameIndex % TargetFPS == 0)
-                {
-                    print("Motion_FPS=" + 1 / (RecordedTime / FrameIndex));
-                }
-            }
-            else
-            {
-                if (Time.frameCount % Application.targetFrameRate == 0)
-                {
-                    print("Motion_FPS=" + 1 / Time.deltaTime);
-                }
-            }
-
-            // Get current frame's Humanoid pose
-            _poseHandler.GetHumanPose(ref _currentPose);
-            // Write the captured pose to poses
-            var serializedPose = new HumanoidPoses.SerializeHumanoidPose();
-
+        private void RecordRootMotion(HumanoidPoses.SerializeHumanoidPose serializedPose)
+        {
             switch (_rootBoneSystem)
             {
                 case MotionDataSettings.Rootbonesystem.Objectroot:
@@ -128,186 +287,158 @@ namespace Entum
                     break;
 
                 case MotionDataSettings.Rootbonesystem.Hipbone:
-                    serializedPose.BodyRootPosition = _animator.GetBoneTransform(_targetRootBone).position;
-                    serializedPose.BodyRootRotation = _animator.GetBoneTransform(_targetRootBone).rotation;
-                    Debug.LogWarning(_animator.GetBoneTransform(_targetRootBone).position);
+                    if (_rootBoneTransform != null)
+                    {
+                        serializedPose.BodyRootPosition = _rootBoneTransform.position;
+                        serializedPose.BodyRootRotation = _rootBoneTransform.rotation;
+                    }
                     break;
 
                 default:
-                    throw new ArgumentOutOfRangeException();
+                    throw new ArgumentOutOfRangeException(nameof(_rootBoneSystem));
             }
-            var bodyTQ = new TQ(_currentPose.bodyPosition, _currentPose.bodyRotation);
-            var LeftFootTQ = new TQ(_animator.GetBoneTransform(IK_LeftFootBone).position, _animator.GetBoneTransform(IK_LeftFootBone).rotation);
-            var RightFootTQ = new TQ(_animator.GetBoneTransform(IK_RightFootBone).position, _animator.GetBoneTransform(IK_RightFootBone).rotation);
-            LeftFootTQ = AvatarUtility.GetIKGoalTQ(_animator.avatar, _animator.humanScale, AvatarIKGoal.LeftFoot, bodyTQ, LeftFootTQ);
-            RightFootTQ = AvatarUtility.GetIKGoalTQ(_animator.avatar, _animator.humanScale, AvatarIKGoal.RightFoot, bodyTQ, RightFootTQ);
-
-            serializedPose.BodyPosition = bodyTQ.t;
-            serializedPose.BodyRotation = bodyTQ.q;
-            serializedPose.LeftfootIK_Pos = LeftFootTQ.t;
-            serializedPose.LeftfootIK_Rot = LeftFootTQ.q;
-            serializedPose.RightfootIK_Pos = RightFootTQ.t;
-            serializedPose.RightfootIK_Rot = RightFootTQ.q;
-
-            serializedPose.FrameCount = FrameIndex;
-            serializedPose.Muscles = new float[_currentPose.muscles.Length];
-            serializedPose.Time = RecordedTime;
-            for (int i = 0; i < serializedPose.Muscles.Length; i++)
-            {
-                serializedPose.Muscles[i] = _currentPose.muscles[i];
-            }
-
-            SetHumanBoneTransformToHumanoidPoses(_animator, ref serializedPose);
-
-            Poses.Poses.Add(serializedPose);
-            FrameIndex++;
         }
 
-        /// <summary>
-        /// Start recording
-        /// </summary>
-        private void RecordStart()
+        private void RecordIKPositions(HumanoidPoses.SerializeHumanoidPose serializedPose, HumanPose pose)
         {
-            if (_recording)
-            {
-                return;
-            }
+            var bodyTQ = new TransformData(pose.bodyPosition, pose.bodyRotation);
+            var leftFootTQ = new TransformData(_leftFootTransform.position, _leftFootTransform.rotation);
+            var rightFootTQ = new TransformData(_rightFootTransform.position, _rightFootTransform.rotation);
 
-            Poses = ScriptableObject.CreateInstance<HumanoidPoses>();
+            leftFootTQ = AvatarUtility.GetIKGoalTQ(_animator.avatar, _animator.humanScale, AvatarIKGoal.LeftFoot, bodyTQ, leftFootTQ);
+            rightFootTQ = AvatarUtility.GetIKGoalTQ(_animator.avatar, _animator.humanScale, AvatarIKGoal.RightFoot, bodyTQ, rightFootTQ);
 
-            if (OnRecordStart != null)
-            {
-                OnRecordStart();
-            }
-
-            OnRecordEnd += WriteAnimationFile;
-            _recording = true;
-            RecordedTime = 0f;
-            StartTime = Time.time;
-            FrameIndex = 0;
+            serializedPose.BodyPosition = bodyTQ.Position;
+            serializedPose.BodyRotation = bodyTQ.Rotation;
+            serializedPose.LeftfootIK_Pos = leftFootTQ.Position;
+            serializedPose.LeftfootIK_Rot = leftFootTQ.Rotation;
+            serializedPose.RightfootIK_Pos = rightFootTQ.Position;
+            serializedPose.RightfootIK_Rot = rightFootTQ.Rotation;
         }
 
-        /// <summary>
-        /// End recording
-        /// </summary>
-        private void RecordEnd()
+        private void RecordFrameData(HumanoidPoses.SerializeHumanoidPose serializedPose, HumanPose pose)
         {
-            if (!_recording)
-            {
-                return;
-            }
-
-            if (OnRecordEnd != null)
-            {
-                OnRecordEnd();
-            }
-
-            OnRecordEnd -= WriteAnimationFile;
-            _recording = false;
+            serializedPose.FrameCount = _state.FrameCount;
+            serializedPose.Time = _state.RecordedTime;
+            serializedPose.Muscles = new float[pose.muscles.Length];
+            Array.Copy(pose.muscles, serializedPose.Muscles, pose.muscles.Length);
         }
 
-        private static void SetHumanBoneTransformToHumanoidPoses(Animator animator, ref HumanoidPoses.SerializeHumanoidPose pose)
+        private void RecordBoneTransforms(HumanoidPoses.SerializeHumanoidPose pose)
         {
-            HumanBodyBones[] values = Enum.GetValues(typeof(HumanBodyBones)) as HumanBodyBones[];
-            foreach (HumanBodyBones b in values)
+            foreach (HumanBodyBones bone in Enum.GetValues(typeof(HumanBodyBones)))
             {
-                if (b < 0 || b >= HumanBodyBones.LastBone)
-                {
-                    continue;
-                }
+                if (bone < 0 || bone >= HumanBodyBones.LastBone) continue;
 
-                Transform t = animator.GetBoneTransform(b);
-                if (t != null)
-                {
-                    var bone = new HumanoidPoses.SerializeHumanoidPose.HumanoidBone();
-                    bone.Set(animator.transform, t);
-                    pose.HumanoidBones.Add(bone);
-                }
+                var transform = _animator.GetBoneTransform(bone);
+                if (transform == null) continue;
+
+                var boneData = new HumanoidPoses.SerializeHumanoidPose.HumanoidBone();
+                boneData.Set(_animator.transform, transform);
+                pose.HumanoidBones.Add(boneData);
             }
         }
 
-        protected virtual void WriteAnimationFile()
+        private void WriteAnimationFile()
         {
 #if UNITY_EDITOR
-            SafeCreateDirectory("Assets/Resources");
+            try
+            {
+                SafeCreateDirectory("Assets/Resources");
+                var path = $"Assets/Resources/RecordMotion_{_animator.name}{DateTime.Now:yyyy_MM_dd_HH_mm_ss}.asset";
+                var uniquePath = AssetDatabase.GenerateUniqueAssetPath(path);
 
-            var path = string.Format("Assets/Resources/RecordMotion_{0}{1:yyyy_MM_dd_HH_mm_ss}.asset", _animator.name, DateTime.Now);
-            var uniqueAssetPath = AssetDatabase.GenerateUniqueAssetPath(path);
-
-            AssetDatabase.CreateAsset(Poses, uniqueAssetPath);
-            AssetDatabase.Refresh();
-            StartTime = Time.time;
-            RecordedTime = 0f;
-            FrameIndex = 0;
+                AssetDatabase.CreateAsset(_state.Poses, uniquePath);
+                AssetDatabase.SaveAssets();
+                AssetDatabase.Refresh();
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"[{nameof(MotionDataRecorder)}] Failed to write animation file: {e.Message}");
+            }
 #endif
         }
 
-        /// <summary>
-        /// Creates all directories and subdirectories in the specified path if they don't exist
-        /// </summary>
-        public static DirectoryInfo SafeCreateDirectory(string path)
+        private void Dispose(bool disposing)
         {
-            return Directory.Exists(path) ? null : Directory.CreateDirectory(path);
+            if (_isDisposed) return;
+
+            if (disposing)
+            {
+                _poseHandler?.Dispose();
+                _posePool.Clear();
+                _transformPool.Clear();
+                _humanPosePool.Clear();
+                DisableInputActions();
+            }
+
+            _isDisposed = true;
         }
-        public Animator CharacterAnimator
+        #endregion
+
+        #region Helper Classes
+        private sealed class RecordingState
         {
-            get { return _animator; }
+            public bool IsRecording { get; private set; }
+            public float RecordedTime { get; private set; }
+            public float StartTime { get; private set; }
+            public int FrameCount { get; private set; }
+            public HumanoidPoses Poses { get; private set; }
+
+            public void StartRecording()
+            {
+                IsRecording = true;
+                RecordedTime = 0f;
+                StartTime = Time.time;
+                FrameCount = 0;
+                Poses = ScriptableObject.CreateInstance<HumanoidPoses>();
+            }
+
+            public void StopRecording()
+            {
+                IsRecording = false;
+                Poses = null;
+            }
+
+            public void UpdateTime(float currentTime)
+            {
+                RecordedTime = currentTime - StartTime;
+            }
+
+            public void IncrementFrame()
+            {
+                FrameCount++;
+            }
         }
 
-        public class TQ
+        private sealed class ObjectPool<T> where T : class, new()
         {
-            public TQ(Vector3 translation, Quaternion rotation)
-            {
-                t = translation;
-                q = rotation;
-            }
-            public Vector3 t;
-            public Quaternion q;
-            // Scale should always be 1,1,1
-        }
-        public class AvatarUtility
-        {
-            static public TQ GetIKGoalTQ(Avatar avatar, float humanScale, AvatarIKGoal avatarIKGoal, TQ animatorBodyPositionRotation, TQ skeletonTQ)
-            {
-                int humanId = (int)HumanIDFromAvatarIKGoal(avatarIKGoal);
-                if (humanId == (int)HumanBodyBones.LastBone)
-                    throw new InvalidOperationException("Invalid human id.");
-                MethodInfo methodGetAxisLength = typeof(Avatar).GetMethod("GetAxisLength", BindingFlags.Instance | BindingFlags.NonPublic);
-                if (methodGetAxisLength == null)
-                    throw new InvalidOperationException("Cannot find GetAxisLength method.");
-                MethodInfo methodGetPostRotation = typeof(Avatar).GetMethod("GetPostRotation", BindingFlags.Instance | BindingFlags.NonPublic);
-                if (methodGetPostRotation == null)
-                    throw new InvalidOperationException("Cannot find GetPostRotation method.");
-                Quaternion postRotation = (Quaternion)methodGetPostRotation.Invoke(avatar, new object[] { humanId });
-                var goalTQ = new TQ(skeletonTQ.t, skeletonTQ.q * postRotation);
-                if (avatarIKGoal == AvatarIKGoal.LeftFoot || avatarIKGoal == AvatarIKGoal.RightFoot)
-                {
-                    // Here you could use animator.leftFeetBottomHeight or animator.rightFeetBottomHeight rather than GetAxisLength
-                    // Both are equivalent but GetAxisLength is the generic way and works for all human bones
-                    float axislength = (float)methodGetAxisLength.Invoke(avatar, new object[] { humanId });
-                    Vector3 footBottom = new Vector3(axislength, 0, 0);
-                    goalTQ.t += (goalTQ.q * footBottom);
-                }
-                // IK goals are in avatar body local space
-                Quaternion invRootQ = Quaternion.Inverse(animatorBodyPositionRotation.q);
-                goalTQ.t = invRootQ * (goalTQ.t - animatorBodyPositionRotation.t);
-                goalTQ.q = invRootQ * goalTQ.q;
-                goalTQ.t /= humanScale;
+            private readonly Stack<T> _pool = new();
 
-                return goalTQ;
-            }
-            static public HumanBodyBones HumanIDFromAvatarIKGoal(AvatarIKGoal avatarIKGoal)
+            public T Get() => _pool.Count > 0 ? _pool.Pop() : new T();
+
+            public void Release(T item)
             {
-                HumanBodyBones humanId = HumanBodyBones.LastBone;
-                switch (avatarIKGoal)
+                if (item != null)
                 {
-                    case AvatarIKGoal.LeftFoot: humanId = HumanBodyBones.LeftFoot; break;
-                    case AvatarIKGoal.RightFoot: humanId = HumanBodyBones.RightFoot; break;
-                    case AvatarIKGoal.LeftHand: humanId = HumanBodyBones.LeftHand; break;
-                    case AvatarIKGoal.RightHand: humanId = HumanBodyBones.RightHand; break;
+                    _pool.Push(item);
                 }
-                return humanId;
+            }
+
+            public void Clear() => _pool.Clear();
+        }
+
+        private readonly struct TransformData
+        {
+            public Vector3 Position { get; }
+            public Quaternion Rotation { get; }
+
+            public TransformData(Vector3 position, Quaternion rotation)
+            {
+                Position = position;
+                Rotation = rotation;
             }
         }
+        #endregion
     }
 }

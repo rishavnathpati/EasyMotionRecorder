@@ -8,82 +8,141 @@ http://opensource.org/licenses/mit-license.php
 */
 
 using UnityEngine;
+using System;
 using System.IO;
+using System.Threading.Tasks;
 
 namespace Entum
 {
     /// <summary>
-    /// Play motion data that was output to CSV
+    /// Runtime player for CSV motion data with optimized performance
     /// </summary>
-    public class MotionDataPlayerCSV : MotionDataPlayer
+    public sealed class MotionDataPlayerCSV : MotionDataPlayer
     {
-        [SerializeField, Tooltip("Must end with a slash")]
+        #region Serialized Fields
+        [Header("CSV Settings")]
+        [SerializeField, Tooltip("Directory path must end with a slash")]
         private string _recordedDirectory;
 
         [SerializeField, Tooltip("Include file extension")]
         private string _recordedFileName;
 
-        // Use this for initialization
-        private void Start()
+        [SerializeField]
+        private bool _loadOnStart = true;
+
+        [SerializeField]
+        private bool _autoPlay;
+        #endregion
+
+        #region Events
+        public event Action<float> OnLoadProgress;
+        public event Action<Exception> OnLoadError;
+        public event Action OnLoadComplete;
+        #endregion
+
+        #region Unity Lifecycle
+        private async void Start()
         {
-            if (string.IsNullOrEmpty(_recordedDirectory))
-            {
-                _recordedDirectory = Application.streamingAssetsPath + "/";
-            }
+            if (!_loadOnStart) return;
 
-            string motionCSVPath = _recordedDirectory + _recordedFileName;
-            LoadCSVData(motionCSVPath);
-        }
-
-        // Create _recordedMotionData from CSV
-        private void LoadCSVData(string motionDataPath)
-        {
-            // Exit if file doesn't exist
-            if (!File.Exists(motionDataPath))
-            {
-                return;
-            }
-
-            RecordedMotionData = ScriptableObject.CreateInstance<HumanoidPoses>();
-
-            FileStream fs = null;
-            StreamReader sr = null;
-
-            // File reading
             try
             {
-                fs = new FileStream(motionDataPath, FileMode.Open);
-                sr = new StreamReader(fs);
-
-                while (sr.Peek() > -1)
+                await LoadMotionDataAsync();
+                if (_autoPlay)
                 {
-                    string line = sr.ReadLine();
-                    var seriHumanPose = new HumanoidPoses.SerializeHumanoidPose();
-                    if (line != "")
-                    {
-                        seriHumanPose.DeserializeCSV(line);
-                        RecordedMotionData.Poses.Add(seriHumanPose);
-                    }
+                    Play();
                 }
-                sr.Close();
-                fs.Close();
-                sr = null;
-                fs = null;
             }
-            catch (System.Exception e)
+            catch (Exception e)
             {
-                Debug.LogError("File reading failed! " + e.Message + e.StackTrace);
-            }
-
-            if (sr != null)
-            {
-                sr.Close();
-            }
-
-            if (fs != null)
-            {
-                fs.Close();
+                Debug.LogError($"[{nameof(MotionDataPlayerCSV)}] Failed to load motion data: {e.Message}");
+                OnLoadError?.Invoke(e);
             }
         }
+        #endregion
+
+        #region Public Methods
+        /// <summary>
+        /// Loads motion data from CSV file
+        /// </summary>
+        public async Task LoadMotionDataAsync(string directory = null, string fileName = null)
+        {
+            var dir = directory ?? _recordedDirectory;
+            if (string.IsNullOrEmpty(dir))
+            {
+                dir = Path.Combine(Application.streamingAssetsPath, "MotionData/");
+            }
+
+            var file = fileName ?? _recordedFileName;
+            if (string.IsNullOrEmpty(file))
+            {
+                throw new ArgumentException("File name not specified");
+            }
+
+            var path = Path.Combine(dir, file);
+            await LoadCSVDataAsync(path);
+        }
+        #endregion
+
+        #region Private Methods
+        private async Task LoadCSVDataAsync(string path)
+        {
+            if (!File.Exists(path))
+            {
+                throw new FileNotFoundException($"Motion data file not found: {path}");
+            }
+
+            try
+            {
+                RecordedMotionData = ScriptableObject.CreateInstance<HumanoidPoses>();
+                
+                using var reader = new StreamReader(path);
+                var totalLines = await CountLinesAsync(path);
+                var currentLine = 0;
+
+                while (!reader.EndOfStream)
+                {
+                    var line = await reader.ReadLineAsync();
+                    if (string.IsNullOrWhiteSpace(line)) continue;
+
+                    try
+                    {
+                        var pose = new SerializeHumanoidPose();
+                        pose.DeserializeCSV(line);
+                        RecordedMotionData.AddPose(pose);
+                    }
+                    catch (Exception e)
+                    {
+                        Debug.LogWarning($"[{nameof(MotionDataPlayerCSV)}] Failed to parse line {currentLine}: {e.Message}");
+                    }
+
+                    currentLine++;
+                    OnLoadProgress?.Invoke((float)currentLine / totalLines);
+                }
+
+                OnLoadComplete?.Invoke();
+            }
+            catch (Exception e)
+            {
+                if (RecordedMotionData != null)
+                {
+                    Destroy(RecordedMotionData);
+                    RecordedMotionData = null;
+                }
+                throw new IOException($"Failed to load CSV data: {e.Message}", e);
+            }
+        }
+
+        private static async Task<int> CountLinesAsync(string path)
+        {
+            using var reader = new StreamReader(path);
+            var count = 0;
+            while (await reader.ReadLineAsync() != null)
+            {
+                count++;
+            }
+            return count;
+        }
+        #endregion
     }
 }
