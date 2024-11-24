@@ -13,14 +13,14 @@ using System.IO;
 namespace Entum
 {
     /// <summary>
-    /// CSVに吐かれたモーションデータを再生する
+    /// Play motion data that was output to CSV
     /// </summary>
     public class MotionDataPlayerCSV : MotionDataPlayer
     {
-        [SerializeField, Tooltip("スラッシュで終わる形で")]
+        [SerializeField, Tooltip("Must end with a slash")]
         private string _recordedDirectory;
 
-        [SerializeField, Tooltip("拡張子も")]
+        [SerializeField, Tooltip("Include file extension")]
         private string _recordedFileName;
 
         // Use this for initialization
@@ -35,22 +35,21 @@ namespace Entum
             LoadCSVData(motionCSVPath);
         }
 
-        //CSVから_recordedMotionDataを作る
+        // Create _recordedMotionData from CSV
         private void LoadCSVData(string motionDataPath)
         {
-            //ファイルが存在しなければ終了
+            // Exit if file doesn't exist
             if (!File.Exists(motionDataPath))
             {
                 return;
             }
-
 
             RecordedMotionData = ScriptableObject.CreateInstance<HumanoidPoses>();
 
             FileStream fs = null;
             StreamReader sr = null;
 
-            //ファイル読み込み
+            // File reading
             try
             {
                 fs = new FileStream(motionDataPath, FileMode.Open);
@@ -73,7 +72,7 @@ namespace Entum
             }
             catch (System.Exception e)
             {
-                Debug.LogError("ファイル読み込み失敗！" + e.Message + e.StackTrace);
+                Debug.LogError("File reading failed! " + e.Message + e.StackTrace);
             }
 
             if (sr != null)

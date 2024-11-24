@@ -18,9 +18,9 @@ using UnityEditor;
 namespace Entum
 {
     /// <summary>
-    /// モーションデータ記録クラス
-    /// スクリプト実行順はVRIKの処理が終わった後の姿勢を取得したいので
-    /// 最大値=32000を指定しています
+    /// Motion data recording class
+    /// Script execution order is set to maximum value = 32000 because we want to capture
+    /// the pose after VRIK processing is complete
     /// </summary>
     [DefaultExecutionOrder(32000)]
     public class MotionDataRecorder : MonoBehaviour
@@ -38,9 +38,9 @@ namespace Entum
         [SerializeField]
         protected int FrameIndex;
 
-        [SerializeField, Tooltip("普段はOBJECTROOTで問題ないです。特殊な機材の場合は変更してください")]
+        [SerializeField, Tooltip("OBJECTROOT is fine for normal use. Change only for special equipment")]
         private MotionDataSettings.Rootbonesystem _rootBoneSystem = MotionDataSettings.Rootbonesystem.Objectroot;
-        [SerializeField, Tooltip("rootBoneSystemがOBJECTROOTの時は使われないパラメータです。")]
+        [SerializeField, Tooltip("This parameter is not used when rootBoneSystem is OBJECTROOT")]
         private HumanBodyBones _targetRootBone = HumanBodyBones.Hips;
         [SerializeField]
         private HumanBodyBones IK_LeftFootBone = HumanBodyBones.LeftFoot;
@@ -56,16 +56,15 @@ namespace Entum
         public Action OnRecordStart;
         public Action OnRecordEnd;
 
-        [Tooltip("記録するFPS。0で制限しない。UpdateのFPSは超えられません。")]
+        [Tooltip("Recording FPS. 0 means no limit. Cannot exceed Update FPS.")]
         public float TargetFPS = 60.0f;
-
 
         // Use this for initialization
         private void Awake()
         {
             if (_animator == null)
             {
-                Debug.LogError("MotionDataRecorderにanimatorがセットされていません。MotionDataRecorderを削除します。");
+                Debug.LogError("No animator set in MotionDataRecorder. Removing MotionDataRecorder.");
                 Destroy(this);
                 return;
             }
@@ -94,7 +93,6 @@ namespace Entum
                 return;
             }
 
-
             RecordedTime = Time.time - StartTime;
 
             if (TargetFPS != 0.0f)
@@ -117,10 +115,9 @@ namespace Entum
                 }
             }
 
-
-            //現在のフレームのHumanoidの姿勢を取得
+            // Get current frame's Humanoid pose
             _poseHandler.GetHumanPose(ref _currentPose);
-            //posesに取得した姿勢を書き込む
+            // Write the captured pose to poses
             var serializedPose = new HumanoidPoses.SerializeHumanoidPose();
 
             switch (_rootBoneSystem)
@@ -152,8 +149,6 @@ namespace Entum
             serializedPose.RightfootIK_Pos = RightFootTQ.t;
             serializedPose.RightfootIK_Rot = RightFootTQ.q;
 
-
-
             serializedPose.FrameCount = FrameIndex;
             serializedPose.Muscles = new float[_currentPose.muscles.Length];
             serializedPose.Time = RecordedTime;
@@ -169,7 +164,7 @@ namespace Entum
         }
 
         /// <summary>
-        /// 録画開始
+        /// Start recording
         /// </summary>
         private void RecordStart()
         {
@@ -177,7 +172,6 @@ namespace Entum
             {
                 return;
             }
-
 
             Poses = ScriptableObject.CreateInstance<HumanoidPoses>();
 
@@ -194,7 +188,7 @@ namespace Entum
         }
 
         /// <summary>
-        /// 録画終了
+        /// End recording
         /// </summary>
         private void RecordEnd()
         {
@@ -202,7 +196,6 @@ namespace Entum
             {
                 return;
             }
-
 
             if (OnRecordEnd != null)
             {
@@ -250,8 +243,7 @@ namespace Entum
         }
 
         /// <summary>
-        /// 指定したパスにディレクトリが存在しない場合
-        /// すべてのディレクトリとサブディレクトリを作成します
+        /// Creates all directories and subdirectories in the specified path if they don't exist
         /// </summary>
         public static DirectoryInfo SafeCreateDirectory(string path)
         {
@@ -290,13 +282,13 @@ namespace Entum
                 var goalTQ = new TQ(skeletonTQ.t, skeletonTQ.q * postRotation);
                 if (avatarIKGoal == AvatarIKGoal.LeftFoot || avatarIKGoal == AvatarIKGoal.RightFoot)
                 {
-                    // Here you could use animator.leftFeetBottomHeight or animator.rightFeetBottomHeight rather than GetAxisLenght
-                    // Both are equivalent but GetAxisLength is the generic way and work for all human bone
+                    // Here you could use animator.leftFeetBottomHeight or animator.rightFeetBottomHeight rather than GetAxisLength
+                    // Both are equivalent but GetAxisLength is the generic way and works for all human bones
                     float axislength = (float)methodGetAxisLength.Invoke(avatar, new object[] { humanId });
                     Vector3 footBottom = new Vector3(axislength, 0, 0);
                     goalTQ.t += (goalTQ.q * footBottom);
                 }
-                // IK goal are in avatar body local space
+                // IK goals are in avatar body local space
                 Quaternion invRootQ = Quaternion.Inverse(animatorBodyPositionRotation.q);
                 goalTQ.t = invRootQ * (goalTQ.t - animatorBodyPositionRotation.t);
                 goalTQ.q = invRootQ * goalTQ.q;

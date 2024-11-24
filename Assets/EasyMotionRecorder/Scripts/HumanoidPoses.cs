@@ -27,7 +27,7 @@ namespace Entum
         }
 
         /// <summary>
-        /// Humanoid用のMuscleマッピング
+        /// Muscle mapping for Humanoid
         /// </summary>
         public static Dictionary<string, string> TraitPropMap = new Dictionary<string, string>
         {
@@ -75,12 +75,12 @@ namespace Entum
     }
 
     /// <summary>
-    /// モーションデータの中身
+    /// Motion data contents
     /// </summary>
     public class HumanoidPoses : ScriptableObject
     {
 #if UNITY_EDITOR
-        //Genericなanimファイルとして出力する
+        // Export as Generic animation file
         [ContextMenu("Export as Generic animation clips")]
         public void ExportGenericAnim()
         {
@@ -109,8 +109,8 @@ namespace Entum
                     rotationCurveW.AddKey(p.Time, p.HumanoidBones[i].LocalRotation.w);
                 }
 
-                //pathは階層
-                //http://mebiustos.hatenablog.com/entry/2015/09/16/230000
+                // path represents hierarchy
+                // http://mebiustos.hatenablog.com/entry/2015/09/16/230000
                 AnimationUtility.SetEditorCurve(clip,
                     new EditorCurveBinding
                     {
@@ -172,7 +172,7 @@ namespace Entum
             AssetDatabase.SaveAssets();
         }
 
-        //Humanoidなanimファイルとして出力する。
+        // Export as Humanoid animation file
         [ContextMenu("Export as Humanoid animation clips")]
         public void ExportHumanoidAnim()
         {
@@ -350,10 +350,10 @@ namespace Entum
 
             public float[] Muscles;
 
-            //フレーム数
+            // Frame count
             public int FrameCount;
 
-            //記録開始後の経過時間。処理落ち対策
+            // Elapsed time since recording started. For handling frame drops
             public float Time;
 
             [Serializable]
@@ -374,7 +374,7 @@ namespace Entum
                     var current = target;
                     while (true)
                     {
-                        if (current == null) throw new Exception(target.name + "は" + root.name + "の子ではありません");
+                        if (current == null) throw new Exception(target.name + " is not a child of " + root.name);
                         if (current == root) break;
 
                         path = (path == "") ? current.name : current.name + "/" + path;
@@ -398,7 +398,7 @@ namespace Entum
 
             public List<HumanoidBone> HumanoidBones = new List<HumanoidBone>();
 
-            //CSVシリアライズ
+            // CSV Serialization
             public string SerializeCSV()
             {
                 StringBuilder sb = new StringBuilder();
@@ -422,7 +422,7 @@ namespace Entum
                     SerializeVector3(sb, humanoidBone.LocalPosition);
                     SerializeQuaternion(sb, humanoidBone.LocalRotation);
                 }
-                sb.Length = sb.Length - 1; //最後のカンマ削除
+                sb.Length = sb.Length - 1; // Remove last comma
                 return sb.ToString();
             }
 
@@ -448,7 +448,7 @@ namespace Entum
                 sb.Append(",");
             }
 
-            //CSVデシリアライズ
+            // CSV Deserialization
             public void DeserializeCSV(string str)
             {
                 string[] dataString = str.Split(',');
@@ -488,7 +488,6 @@ namespace Entum
             {
                 return new Quaternion(float.Parse(str[startIndex]), float.Parse(str[startIndex + 1]), float.Parse(str[startIndex + 2]), float.Parse(str[startIndex + 3]));
             }
-
         }
 
         public List<SerializeHumanoidPose> Poses = new List<SerializeHumanoidPose>();

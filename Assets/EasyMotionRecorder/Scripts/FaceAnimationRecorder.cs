@@ -1,12 +1,4 @@
-﻿using System;
-using System.Collections;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using UnityEditor;
-using UnityEngine;
-
-/**
+﻿/**
 [EasyMotionRecorder]
 
 Copyright (c) 2018 Duo.inc
@@ -15,27 +7,34 @@ This software is released under the MIT License.
 http://opensource.org/licenses/mit-license.php
 */
 
+using UnityEngine;
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using UnityEditor;
+
 namespace Entum
 {
     /// <summary>
-    /// Blendshapeの動きを記録するクラス
-    /// リップシンクは後入れでTimeline上にAudioClipをつけて、みたいな可能性が高いので
-    /// Exclusive(除外)するBlendshape名を登録できるようにしています。
+    /// Class for recording blendshape movements
+    /// Since lip sync is likely to be added later on the Timeline with AudioClip,
+    /// you can register Exclusive (excluded) Blendshape names.
     /// </summary>
     [RequireComponent(typeof(MotionDataRecorder))]
     public class FaceAnimationRecorder : MonoBehaviour
     {
-        [Header("表情記録を同時に行う場合はtrueにします")] [SerializeField]
+        [Header("Set to true if you want to record facial expressions simultaneously")] [SerializeField]
         private bool _recordFaceBlendshapes = false;
 
-        [Header("リップシンクを記録したくない場合はここにモーフ名を入れていく 例:face_mouse_eなど")] [SerializeField]
+        [Header("Add morph names here if you don't want to record lip sync, e.g., face_mouse_e etc.")] [SerializeField]
         private List<string> _exclusiveBlendshapeNames;
 
-        [Tooltip("記録するFPS。0で制限しない。UpdateのFPSは超えられません。")]
+        [Tooltip("Recording FPS. 0 means no limit. Cannot exceed Update FPS.")]
         public float TargetFPS = 60.0f;
 
         private MotionDataRecorder _animRecorder;
-
 
         private SkinnedMeshRenderer[] _smeshs;
 
@@ -44,7 +43,6 @@ namespace Entum
         private bool _recording = false;
 
         private int _frameCount = 0;
-
 
         CharacterFacialData.SerializeHumanoidFace _past = new CharacterFacialData.SerializeHumanoidFace();
 
@@ -95,7 +93,7 @@ namespace Entum
         }
 
         /// <summary>
-        /// 記録開始
+        /// Start recording
         /// </summary>
         private void RecordStart()
         {
@@ -111,7 +109,7 @@ namespace Entum
 
             if (_smeshs.Length == 0)
             {
-                Debug.LogError("顔のメッシュ指定がされていないので顔のアニメーションは記録しません");
+                Debug.LogError("No facial mesh specified, facial animation will not be recorded");
                 return;
             }
 
@@ -124,7 +122,7 @@ namespace Entum
         }
 
         /// <summary>
-        /// 記録終了
+        /// End recording
         /// </summary>
         private void RecordEnd()
         {
@@ -135,7 +133,7 @@ namespace Entum
 
             if (_smeshs.Length == 0)
             {
-                Debug.LogError("顔のメッシュ指定がされていないので顔のアニメーションは記録しませんでした");
+                Debug.LogError("No facial mesh specified, facial animation was not recorded");
                 if (_recording == true)
                 {
                     Debug.LogAssertion("Unexpected execution!!!!");
@@ -143,7 +141,6 @@ namespace Entum
             }
             else
             {
-                //WriteAnimationFileToScriptableObject();
                 ExportFacialAnimationClip(_animRecorder.CharacterAnimator, _facialData);
             }
 
@@ -151,7 +148,6 @@ namespace Entum
 
             _recording = false;
         }
-
 
         private void WriteAnimationFileToScriptableObject()
         {
@@ -164,7 +160,7 @@ namespace Entum
 
             if (_facialData == null)
             {
-                Debug.LogError("記録されたFaceデータがnull");
+                Debug.LogError("Recorded Face data is null");
             }
             else
             {
@@ -176,7 +172,7 @@ namespace Entum
             _frameCount = 0;
         }
 
-        //フレーム内の差分が無いかをチェックするやつ。
+        // Check for differences within frames
         private bool IsSame(CharacterFacialData.SerializeHumanoidFace a, CharacterFacialData.SerializeHumanoidFace b)
         {
             if (a == null || b == null || a.Smeshes.Count == 0 || b.Smeshes.Count == 0)
@@ -227,7 +223,6 @@ namespace Entum
                 }
             }
 
-
             var p = new CharacterFacialData.SerializeHumanoidFace();
             for (int i = 0; i < _smeshs.Length; i++)
             {
@@ -248,7 +243,6 @@ namespace Entum
                             useThis = false;
                         }
                     }
-
 
                     if (useThis)
                     {
@@ -271,12 +265,9 @@ namespace Entum
             _frameCount++;
         }
 
-
         /// <summary>
-        /// Animatorと記録したデータで書き込む
+        /// Write with Animator and recorded data
         /// </summary>
-        /// <param name="root"></param>
-        /// <param name="facial"></param>
         void ExportFacialAnimationClip(Animator root, CharacterFacialData facial)
         {
             var animclip = new AnimationClip();
@@ -293,11 +284,11 @@ namespace Entum
                     pathsb.Insert(0, "/").Insert(0, trans.name);
                 }
 
-                //pathにはBlendshapeのベース名が入る
-                //U_CHAR_1:SkinnedMeshRendererみたいなもの
+                // Path contains the base name of the Blendshape
+                // Something like U_CHAR_1:SkinnedMeshRenderer
                 var path = pathsb.ToString();
 
-                //個別メッシュの個別Blendshapeごとに、AnimationCurveを生成している
+                // Generate AnimationCurve for each individual Blendshape of each individual mesh
                 for (var blendShapeIndex = 0;
                     blendShapeIndex < mesh[faceTargetMeshIndex].sharedMesh.blendShapeCount;
                     blendShapeIndex++)
@@ -318,7 +309,6 @@ namespace Entum
                         pastBlendshapeWeight = _facialData.Facials[k].Smeshes[faceTargetMeshIndex].blendShapes[blendShapeIndex];
                     }
 
-
                     AnimationUtility.SetEditorCurve(animclip, curveBinding, curve);
                 }
             }
@@ -336,10 +326,8 @@ namespace Entum
         }
 
         /// <summary>
-        /// Animatorと記録したデータで書き込むテスト
+        /// Test writing with Animator and recorded data
         /// </summary>
-        /// <param name="root"></param>
-        /// <param name="facial"></param>
         void ExportFacialAnimationClipTest()
         {
             var animclip = new AnimationClip();
@@ -366,8 +354,7 @@ namespace Entum
                     curveBinding.propertyName = "blendShape." + mesh[i].sharedMesh.GetBlendShapeName(j);
                     AnimationCurve curve = new AnimationCurve();
 
-
-                    //全てのBlendshapeに対して0→100→0の遷移でキーを打つ
+                    // Add keys for all Blendshapes with 0→100→0 transition
                     curve.AddKey(0, 0);
                     curve.AddKey(1, 100);
                     curve.AddKey(2, 0);

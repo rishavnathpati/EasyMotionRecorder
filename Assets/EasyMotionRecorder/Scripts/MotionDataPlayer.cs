@@ -13,10 +13,10 @@ using System;
 namespace Entum
 {
     /// <summary>
-    /// モーションデータ再生クラス
-    /// SpringBone, DynamicBone, BulletPhysicsImplなどの揺れ物アセットのScript Execution Orderを20000など
-    /// 大きな値にしてください。
-    /// DefaultExecutionOrder(11000) はVRIK系より処理順を遅くする、という意図です
+    /// Motion data playback class
+    /// Please set Script Execution Order to a large value like 20000 for assets with physics-based movement
+    /// like SpringBone, DynamicBone, BulletPhysicsImpl, etc.
+    /// DefaultExecutionOrder(11000) is intended to make the processing order later than VRIK systems
     /// </summary>
     [DefaultExecutionOrder(11000)]
     public class MotionDataPlayer : MonoBehaviour
@@ -31,16 +31,16 @@ namespace Entum
         [SerializeField]
         private Animator _animator;
 
-        [SerializeField, Tooltip("再生開始フレームを指定します。0だとファイル先頭から開始です")]
+        [SerializeField, Tooltip("Specify the starting frame. 0 starts from the beginning of the file")]
         private int _startFrame;
         [SerializeField]
         private bool _playing;
         [SerializeField]
         private int _frameIndex;
 
-        [SerializeField, Tooltip("普段はOBJECTROOTで問題ないです。特殊な機材の場合は変更してください")]
+        [SerializeField, Tooltip("OBJECTROOT is fine for normal use. Change only for special equipment")]
         private MotionDataSettings.Rootbonesystem _rootBoneSystem = MotionDataSettings.Rootbonesystem.Objectroot;
-        [SerializeField, Tooltip("rootBoneSystemがOBJECTROOTの時は使われないパラメータです。")]
+        [SerializeField, Tooltip("This parameter is not used when rootBoneSystem is OBJECTROOT")]
         private HumanBodyBones _targetRootBone = HumanBodyBones.Hips;
 
         private HumanPoseHandler _poseHandler;
@@ -51,11 +51,10 @@ namespace Entum
         {
             if (_animator == null)
             {
-                Debug.LogError("MotionDataPlayerにanimatorがセットされていません。MotionDataPlayerを削除します。");
+                Debug.LogError("No animator set in MotionDataPlayer. Removing MotionDataPlayer.");
                 Destroy(this);
                 return;
             }
-
 
             _poseHandler = new HumanPoseHandler(_animator.avatar, _animator.transform);
             _onPlayFinish += StopMotion;
@@ -82,13 +81,12 @@ namespace Entum
                 return;
             }
 
-
             _playingTime += Time.deltaTime;
             SetHumanPose();
         }
 
         /// <summary>
-        /// モーションデータ再生開始
+        /// Start motion data playback
         /// </summary>
         private void PlayMotion()
         {
@@ -99,10 +97,9 @@ namespace Entum
 
             if (RecordedMotionData == null)
             {
-                Debug.LogError("録画済みモーションデータが指定されていません。再生を行いません。");
+                Debug.LogError("No recorded motion data specified. Playback will not proceed.");
                 return;
             }
-
 
             _playingTime = _startFrame * (Time.deltaTime / 1f);
             _frameIndex = _startFrame;
@@ -110,7 +107,7 @@ namespace Entum
         }
 
         /// <summary>
-        /// モーションデータ再生終了。フレーム数が最後になっても自動で呼ばれる
+        /// End motion data playback. Automatically called when frame count reaches the end
         /// </summary>
         private void StopMotion()
         {
@@ -118,7 +115,6 @@ namespace Entum
             {
                 return;
             }
-
 
             _playingTime = 0f;
             _frameIndex = _startFrame;
@@ -152,7 +148,7 @@ namespace Entum
                     throw new ArgumentOutOfRangeException();
             }
 
-            //処理落ちしたモーションデータの再生速度調整
+            // Adjust playback speed for motion data with frame drops
             if (_playingTime > RecordedMotionData.Poses[_frameIndex].Time)
             {
                 _frameIndex++;

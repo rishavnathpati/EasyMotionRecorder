@@ -14,25 +14,25 @@ using System.IO;
 namespace Entum
 {
     /// <summary>
-    /// モーションデータをCSVに記録するクラス
-    /// ランタイムでも記録できる
+    /// Class for recording motion data to CSV
+    /// Can record during runtime
     /// </summary>
     [DefaultExecutionOrder(31000)]
     public class MotionDataRecorderCSV : MotionDataRecorder
     {
-        [SerializeField, Tooltip("スラッシュで終わる形で")]
+        [SerializeField, Tooltip("Must end with a slash")]
         private string _outputDirectory;
 
-        [SerializeField, Tooltip("拡張子も")]
+        [SerializeField, Tooltip("Include file extension")]
         private string _outputFileName;
 
         protected override void WriteAnimationFile()
         {
-            //ファイルオープン
+            // Open file
             string directoryStr = _outputDirectory;
             if (directoryStr == "")
             {
-                //自動設定ディレクトリ
+                // Auto-set directory
                 directoryStr = Application.streamingAssetsPath + "/";
 
                 if (!Directory.Exists(directoryStr))
@@ -44,7 +44,7 @@ namespace Entum
             string fileNameStr = _outputFileName;
             if (fileNameStr == "")
             {
-                //自動設定ファイル名
+                // Auto-set filename
                 fileNameStr = string.Format("motion_{0:yyyy_MM_dd_HH_mm_ss}.csv", DateTime.Now);
             }
 
@@ -57,7 +57,7 @@ namespace Entum
                 sw.WriteLine(seriStr);
             }
 
-            //ファイルクローズ
+            // Close file
             try
             {
                 sw.Close();
@@ -67,7 +67,7 @@ namespace Entum
             }
             catch (Exception e)
             {
-                Debug.LogError("ファイル書き出し失敗！" + e.Message + e.StackTrace);
+                Debug.LogError("File writing failed! " + e.Message + e.StackTrace);
             }
 
             if (sw != null)
